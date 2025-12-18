@@ -7,11 +7,11 @@ from deep_translator import GoogleTranslator
 # Настройка логов
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-TOKEN = "8423716080:AAHw2675_s_gPZPucIQTf762MSQCGotXMBU"
+TOKEN = "ТВОЙ_ТОКЕН_БОТА"
 bot = telebot.TeleBot(TOKEN)
 
 # Глобальная переменная для ссылки из Colab
-COLAB_URL = "https://periodically-arthritis-princess-functioning.trycloudflare.com/sdapi/v1/txt2img"
+COLAB_URL = ""
 
 @bot.message_handler(commands=['start'])
 def start(message):
