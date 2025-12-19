@@ -9,10 +9,11 @@ from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 from huggingface_hub import InferenceClient
 
-# --- НАСТРОЙКИ ---
+# --- ЛОГИРОВАНИЕ ---
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
+# --- ПРОВЕРКА ТОКЕНОВ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
 PORT = int(os.getenv("PORT", 8080))
@@ -22,50 +23,33 @@ dp = Dispatcher()
 translator = GoogleTranslator(source='auto', target='en')
 client = InferenceClient(token=HF_TOKEN)
 
-# База данных в оперативной памяти
 user_db = {}
 
-# Константы моделей и стилей
+# --- ОБНОВЛЕННЫЕ РАБОЧИЕ МОДЕЛИ 2025 ---
 MODELS = {
-    "🚀 Flux.1 (Fast)": "black-forest-labs/FLUX.1-schnell",
-    "📸 Realism XL": "stabilityai/stable-diffusion-3.5-large",
-    "⛩ Anime V3": "cagliostrolab/animagine-xl-3.1",
-    "🎨 Dreamshaper": "Lykon/DreamShaper"
+    "🚀 Flux.1 (Лучшая)": "black-forest-labs/FLUX.1-schnell",
+    "📸 Realism (Стабильная)": "stabilityai/stable-diffusion-xl-base-1.0",
+    "⛩ Anime (Новая)": "cagliostrolab/animagine-xl-3.1",
+    "🎨 Dreamshaper (V8)": "Lykon/DreamShaper"
 }
 
 STYLES = {
     "🚫 Без стиля": "",
-    "🌌 Cyberpunk": "neon lighting, cyberpunk 2077 aesthetic, futuristic",
-    "📸 Realistic": "8k uhd, photorealistic, raw photo, highly detailed",
-    "🏮 Studio Ghibli": "hand-drawn, studio ghibli style, anime aesthetic",
-    "💎 Premium Art": "masterpiece, trending on artstation, cinematic lighting",
-    "🎮 3D Render": "unreal engine 5, octane render, 3d style, cute"
+    "🌌 Cyberpunk": "neon lights, cyberpunk, futuristic city background",
+    "📸 Realistic": "8k resolution, photorealistic, cinematic lighting, masterpiece",
+    "🏮 Studio Ghibli": "anime style, studio ghibli aesthetic, soft painting",
+    "💎 Premium Art": "highly detailed, artistic, digital illustration, trending on artstation",
+    "🎮 3D Render": "unreal engine 5, octane render, stylized 3d"
 }
 
-HELP_TEXT = (
-    "📖 **ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ:**\n\n"
-    "🖼 **Фото:** Просто пиши запрос. Бот использует ТОП-модели (Flux/SDXL). "
-    "Можно писать на русском — я сам переведу!\n\n"
-    "🎬 **Видео:** Нажми кнопку 'РЕЖИМ: ВИДЕО'. Опиши действие (напр. 'кот бежит по луне'). "
-    "Генерация занимает 30-90 секунд.\n\n"
-    "🪄 **Magic Prompt:** Если включено, я сам добавлю в твой запрос детали "
-    "(свет, тени, качество), чтобы картинка выглядела профессионально.\n\n"
-    "⚙️ **Настройки:** Здесь можно сменить нейросеть или выбрать стиль (Аниме, Киберпанк и др.).\n\n"
-    "📊 **Профиль:** Твой уровень и количество созданных шедевров.\n\n"
-    "⚠️ *Подсказка: Если нейросеть занята, я автоматически переключусь на резервную!*"
-)
-
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-
 def get_user(uid, name="User"):
     if uid not in user_db:
         user_db[uid] = {
-            "mode": "photo", "style": "🚫 Без стиля", "model": "🚀 Flux.1 (Fast)",
+            "mode": "photo", "style": "🚫 Без стиля", "model": "🚀 Flux.1 (Лучшая)",
             "stats": 0, "magic": True, "name": name, "last_gen": 0
         }
     return user_db[uid]
-
-# --- КЛАВИАТУРЫ ---
 
 def main_kb(u):
     magic_status = "ON ✅" if u["magic"] else "OFF ❌"
@@ -81,108 +65,98 @@ def main_kb(u):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     u = get_user(message.from_user.id, message.from_user.full_name)
-    welcome = (
-        f"🔥 **ПРИВЕТ, {message.from_user.first_name}!**\n"
-        "Я — твой персональный ИИ-комбайн.\n\n" + HELP_TEXT
-    )
+    welcome = f"🔥 **ПРИВЕТ, {message.from_user.first_name}!**\nЯ — твой ИИ-бот. Пиши запрос или используй кнопки!"
     await message.answer(welcome, reply_markup=main_kb(u), parse_mode="Markdown")
-
-@dp.message(F.text.startswith("🔄 РЕЖИМ:"))
-async def toggle_mode(message: types.Message):
-    u = get_user(message.from_user.id)
-    u["mode"] = "video" if u["mode"] == "photo" else "photo"
-    await message.answer(f"✅ Режим изменен на: **{u['mode'].upper()}**", reply_markup=main_kb(u), parse_mode="Markdown")
-
-@dp.message(F.text.startswith("🪄 MAGIC:"))
-async def toggle_magic(message: types.Message):
-    u = get_user(message.from_user.id)
-    u["magic"] = not u["magic"]
-    await message.answer(f"🪄 Magic Prompt теперь: **{'ВКЛ' if u['magic'] else 'ВЫКЛ'}**", reply_markup=main_kb(u), parse_mode="Markdown")
 
 @dp.message(F.text == "⚙️ НАСТРОЙКИ")
 async def settings_menu(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="🤖 Выбрать модель", callback_data="menu_models"))
     builder.row(InlineKeyboardButton(text="🎨 Выбрать стиль", callback_data="menu_styles"))
-    await message.answer("🛠 **Настройка ИИ под себя:**", reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await message.answer("🛠 **Настройка ИИ:**", reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+# --- ПОЧИНЕННЫЕ КНОПКИ ВЫБОРА ---
 
 @dp.callback_query(F.data == "menu_models")
 async def models_list(call: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     for m in MODELS.keys(): builder.add(InlineKeyboardButton(text=m, callback_data=f"set_mod_{m}"))
     builder.adjust(1)
-    await call.message.edit_text("🤖 **Доступные нейросети:**", reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await call.message.edit_text("🤖 **Выберите нейросеть:**", reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "menu_styles")
+async def styles_list(call: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    for s in STYLES.keys(): builder.add(InlineKeyboardButton(text=s, callback_data=f"set_sty_{s}"))
+    builder.adjust(2)
+    await call.message.edit_text("🎨 **Выберите стиль:**", reply_markup=builder.as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("set_mod_"))
 async def set_model(call: types.CallbackQuery):
     m = call.data.replace("set_mod_", "")
     get_user(call.from_user.id)["model"] = m
-    await call.answer(f"Выбрана модель: {m}")
-    await call.message.delete()
+    await call.answer(f"✅ Модель {m} выбрана!")
+    await call.message.edit_text(f"🤖 Текущая модель: **{m}**", parse_mode="Markdown")
 
-@dp.message(F.text == "📊 ПРОФИЛЬ")
-async def show_profile(message: types.Message):
+@dp.callback_query(F.data.startswith("set_sty_"))
+async def set_style(call: types.CallbackQuery):
+    s = call.data.replace("set_sty_", "")
+    get_user(call.from_user.id)["style"] = s
+    await call.answer(f"✅ Стиль {s} применен!")
+    await call.message.edit_text(f"🎨 Текущий стиль: **{s}**", parse_mode="Markdown")
+
+# --- ЛОГИКА ГЕНЕРАЦИИ ---
+
+@dp.message(F.text.startswith("🔄 РЕЖИМ:"))
+async def toggle_mode(message: types.Message):
     u = get_user(message.from_user.id)
-    level = (u["stats"] // 10) + 1
-    await message.answer(
-        f"👤 **Имя:** {u['name']}\n"
-        f"🏆 **Уровень:** {level}\n"
-        f"⚡ **Создано работ:** {u['stats']}\n"
-        f"🤖 **Модель:** {u['model']}\n"
-        f"✨ **Стиль:** {u['style']}", parse_mode="Markdown"
-    )
+    u["mode"] = "video" if u["mode"] == "photo" else "photo"
+    await message.answer(f"✅ Режим: **{u['mode'].upper()}**", reply_markup=main_kb(u), parse_mode="Markdown")
+
+@dp.message(F.text.startswith("🪄 MAGIC:"))
+async def toggle_magic(message: types.Message):
+    u = get_user(message.from_user.id)
+    u["magic"] = not u["magic"]
+    await message.answer(f"🪄 Magic: **{'ВКЛ' if u['magic'] else 'ВЫКЛ'}**", reply_markup=main_kb(u), parse_mode="Markdown")
 
 @dp.message(F.text)
 async def handle_gen(message: types.Message):
-    if message.text.startswith("/") or "РЕЖИМ" in message.text or "MAGIC" in message.text: return
+    if message.text.startswith("/") or "РЕЖИМ" in message.text or "MAGIC" in message.text or "НАСТРОЙКИ" in message.text: return
     
     u = get_user(message.from_user.id)
-    
-    # Cooldown 5 секунд
-    if time.time() - u["last_gen"] < 5:
-        return await message.answer("⚠️ Подожди немного, ИИ разогревается!")
-    
-    status = await message.answer("📡 **Связь с нейросетью...**", parse_mode="Markdown")
+    status = await message.answer("📡 **Связь с ИИ...**", parse_mode="Markdown")
     
     try:
-        # Перевод и магия
         prompt_en = translator.translate(message.text)
-        if u["magic"]: prompt_en += ", cinematic, masterpiece, 8k, highly detailed, trending on artstation"
-        
+        if u["magic"]: prompt_en += ", highly detailed, 8k, masterpiece"
+
         if u["mode"] == "video":
-            await status.edit_text("🎬 **Генерирую анимацию (до 90 сек)...**")
-            url = f"https://image.pollinations.ai/prompt/{prompt_en}?model=video&seed={random.randint(1,9999)}"
+            await status.edit_text("🎬 **Генерация видео...**")
+            url = f"https://image.pollinations.ai/prompt/{prompt_en}?model=video"
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=180) as r:
-                    if r.status == 200:
-                        data = await r.read()
-                        await message.answer_video(BufferedInputFile(data, "v.mp4"), caption="🎬 Видео готово!")
-                    else: raise Exception("API Error")
+                async with session.get(url) as r:
+                    data = await r.read()
+                    await message.answer_video(BufferedInputFile(data, "v.mp4"))
         else:
-            await status.edit_text("🎨 **Рисую картину...**")
-            model_path = MODELS.get(u["model"], MODELS["🚀 Flux.1 (Fast)"])
+            await status.edit_text("🎨 **Рисую...**")
+            model_path = MODELS.get(u["model"], MODELS["🚀 Flux.1 (Лучшая)"])
             full_prompt = f"{prompt_en}, {STYLES.get(u['style'], '')}"
             
-            # Генерация
             image = client.text_to_image(full_prompt, model=model_path)
             img_buf = io.BytesIO()
             image.save(img_buf, format='PNG')
             
             u["stats"] += 1
-            u["last_gen"] = time.time()
-            await message.answer_photo(
-                BufferedInputFile(img_buf.getvalue(), "i.png"),
-                caption=f"✅ **Готово!**\n🤖 Модель: `{u['model']}`\n📊 Работа №{u['stats']}",
-                parse_mode="Markdown"
-            )
+            await message.answer_photo(BufferedInputFile(img_buf.getvalue(), "i.png"), 
+                                     caption=f"✅ Готово! Модель: {u['model']}")
 
         await status.delete()
     except Exception as e:
         logging.error(e)
-        await status.edit_text("❌ Ошибка. Возможно, промпт слишком сложный или сервер HF перегружен.")
+        await status.edit_text("❌ Ошибка сервера. Попробуйте другой промпт.")
 
-# --- SERVER FOR RENDER ---
-async def handle_ping(request): return web.Response(text="AI Active")
+# --- ЗАПУСК ---
+async def handle_ping(request): return web.Response(text="OK")
 
 async def main():
     app = web.Application()
