@@ -2,6 +2,7 @@ import asyncio
 import os
 import random
 import logging
+import io
 from aiohttp import web
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -12,88 +13,100 @@ from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 from huggingface_hub import InferenceClient
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ И ЛОГИ ---
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 load_dotenv()
 
+# Проверка переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-HF_TOKEN = os.getenv("HF_TOKEN") # Ваш новый Fine-grained токен
+HF_TOKEN = os.getenv("HF_TOKEN")
 PORT = int(os.getenv("PORT", 8080))
+
+if not BOT_TOKEN or not HF_TOKEN:
+    logger.error("КРИТИЧЕСКАЯ ОШИБКА: Токены BOT_TOKEN или HF_TOKEN не найдены в переменных окружения!")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 translator = GoogleTranslator(source='auto', target='en')
 
-# Список топовых моделей для роутинга (Text-to-Image)
+# Список топовых моделей для роутинга
 MODELS = [
     "black-forest-labs/FLUX.1-schnell",
     "stabilityai/stable-diffusion-3.5-large",
     "XLabs-AI/Flux-Realism-LoRA", 
-    "RunDiffusion/Juggernaut-XL-v9",
-    "prompthero/openjourney"
+    "RunDiffusion/Juggernaut-XL-v9"
 ]
 
-# Стили для промптов
 STYLES = {
     "🚫 Без стиля": "",
-    "💎 Фотореализм": "hyper-realistic, 8k, highly detailed, masterpieces, photography, sharp focus",
+    "💎 Фотореализм": "hyper-realistic, 8k, raw photo, masterpieces, photography, sharp focus",
     "⛩ Аниме": "anime style, vibrant colors, studio ghibli aesthetic, high quality digital art",
-    "🌌 Киберпанк": "cyberpunk aesthetic, neon lighting, futuristic, high contrast, detailed",
-    "🎨 Масло": "oil painting texture, visible brushstrokes, classical art masterpiece",
+    "🌌 Киберпанк": "cyberpunk aesthetic, neon lighting, futuristic, sharp details",
+    "🎨 Масло": "oil painting texture, classical art masterpiece",
     "🎮 Игровой": "unreal engine 5 render, video game style, 3d, volumetric lighting"
 }
 
 # Инициализация клиента HF
 client = InferenceClient(token=HF_TOKEN)
 
-# Данные пользователей (в памяти)
+# Данные пользователей в памяти
 user_settings = {}
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+
+def get_user_config(uid):
+    """Безопасное получение настроек пользователя без KeyError"""
+    if uid not in user_settings:
+        user_settings[uid] = {
+            "style": "🚫 Без стиля", 
+            "mode": "photo",
+            "last_time": 0
+        }
+    return user_settings[uid]
+
 # --- КЛАВИАТУРЫ ---
+
 def main_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🖼 Создать Фото"), KeyboardButton(text="🎬 Создать Видео")],
-        [KeyboardButton(text="🎭 Выбрать Стиль"), KeyboardButton(text="📊 Статус")],
+        [KeyboardButton(text="🎭 Выбрать Стиль"), KeyboardButton(text="📊 Инфо")],
     ], resize_keyboard=True)
 
-# --- ЛОГИКА ГЕНЕРАЦИИ ---
+# --- ЯДРО ГЕНЕРАЦИИ ---
 
 async def generate_image(prompt, user_style):
     full_prompt = f"{prompt}, {STYLES.get(user_style, '')}"
-    
-    # Пытаемся пройтись по списку моделей, если одна занята
     for model in MODELS:
         try:
-            # Используем новый метод Inference Providers
+            # Генерация через Inference Providers
             image = client.text_to_image(full_prompt, model=model)
-            # Конвертируем PIL Image в байты
-            import io
             img_byte_arr = io.BytesIO()
             image.save(img_byte_arr, format='PNG')
             return img_byte_arr.getvalue(), model
         except Exception as e:
-            logging.warning(f"Модель {model} выдала ошибку: {e}. Пробую следующую...")
+            logger.warning(f"Модель {model} занята, пробую следующую...")
             continue
     return None, None
 
 async def generate_video(prompt):
-    # Видео генерируем через Pollinations (самый быстрый бесплатный API для видео сейчас)
     url = f"https://image.pollinations.ai/prompt/{prompt}?model=video&seed={random.randint(1, 999999)}"
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=120) as resp:
+            async with session.get(url, timeout=150) as resp:
                 if resp.status == 200:
                     return await resp.read()
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка видео: {e}")
             return None
 
-# --- ОБРАБОТЧИКИ ---
+# --- ОБРАБОТЧИКИ СОБЫТИЙ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    user_settings[message.from_user.id] = {"style": "🚫 Без стиля", "mode": "photo"}
+    get_user_config(message.from_user.id) # Инициализация
     await message.answer(
-        "🔥 **Бот запущен и готов к работе!**\n\nИспользую технологию **HF Inference Providers 2025**.\nВыбирай режим и пиши запрос!",
+        "🔥 **Бот ИИ БЕЗ ЦЕНЗУРЫ запущен!**\n\nЯ использую систему роутинга между топовыми нейросетями. Выбирай режим и твори!",
         reply_markup=main_kb(), parse_mode="Markdown"
     )
 
@@ -103,83 +116,96 @@ async def style_menu(message: types.Message):
     for s in STYLES.keys():
         builder.add(InlineKeyboardButton(text=s, callback_data=f"set_style_{s}"))
     builder.adjust(2)
-    await message.answer("Выберите стиль для генерации:", reply_markup=builder.as_markup())
+    await message.answer("Выберите визуальный стиль:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("set_style_"))
 async def set_style(call: types.CallbackQuery):
     style = call.data.replace("set_style_", "")
-    user_settings[call.from_user.id]["style"] = style
+    get_user_config(call.from_user.id)["style"] = style
     await call.message.edit_text(f"✅ Установлен стиль: **{style}**", parse_mode="Markdown")
 
 @dp.message(F.text == "🖼 Создать Фото")
 async def mode_photo(message: types.Message):
-    user_settings[message.from_user.id]["mode"] = "photo"
-    await message.answer("📸 Принято. Теперь просто напиши, что нарисовать (на любом языке):")
+    get_user_config(message.from_user.id)["mode"] = "photo"
+    await message.answer("📸 Режим ФОТО активен. Пришлите описание:")
 
 @dp.message(F.text == "🎬 Создать Видео")
 async def mode_video(message: types.Message):
-    user_settings[message.from_user.id]["mode"] = "video"
-    await message.answer("📹 Видео-режим активен. Напиши описание для короткого ролика:")
+    get_user_config(message.from_user.id)["mode"] = "video"
+    await message.answer("📹 Режим ВИДЕО активен. Опишите сюжет для ролика:")
+
+@dp.message(F.text == "📊 Инфо")
+async def show_info(message: types.Message):
+    await message.answer("🤖 Бот работает на базе **Hugging Face Inference**.\nПоддержка видео: **Pollinations AI**.\nХостинг: **Render**.")
 
 @dp.message(F.text)
 async def handle_request(message: types.Message):
     uid = message.from_user.id
-    if uid not in user_settings:
-        user_settings[uid] = {"style": "🚫 Без стиля", "mode": "photo"}
+    conf = get_user_config(uid)
     
-    if message.text in ["🖼 Создать Фото", "🎬 Создать Видео", "🎭 Выбрать Стиль", "📊 Статус"]:
+    if message.text in ["🖼 Создать Фото", "🎬 Создать Видео", "🎭 Выбрать Стиль", "📊 Инфо"]:
         return
 
-    wait_msg = await message.answer("⏳ **Нейросеть думает...** Ожидайте результата.", parse_mode="Markdown")
+    # Защита от спама (cooldown 3 сек)
+    if time.time() - conf["last_time"] < 3:
+        return await message.answer("⚠️ Не частите! Подождите пару секунд.")
+    conf["last_time"] = time.time()
+
+    wait_msg = await message.answer("🧪 **ИИ начал работу...**", parse_mode="Markdown")
     
     try:
-        # Перевод
+        # Авто-перевод
         prompt_en = translator.translate(message.text)
-        mode = user_settings[uid]["mode"]
         
-        if mode == "photo":
-            img_data, model_name = await generate_image(prompt_en, user_settings[uid]["style"])
+        if conf["mode"] == "video":
+            await wait_msg.edit_text("📽 **Рендеринг видео (это долго)...**")
+            data = await generate_video(prompt_en)
+            if data:
+                await message.answer_video(BufferedInputFile(data, filename="ai_vid.mp4"), caption="🎬 Ваше видео!")
+                await wait_msg.delete()
+            else:
+                await wait_msg.edit_text("❌ Ошибка генерации видео. Попробуйте позже.")
+        
+        else:
+            img_data, model_name = await generate_image(prompt_en, conf["style"])
             if img_data:
                 await message.answer_photo(
-                    BufferedInputFile(img_data, filename="ai_result.png"),
-                    caption=f"✅ Готово!\n🤖 Модель: `{model_name}`\n🎭 Стиль: `{user_settings[uid]['style']}`",
+                    BufferedInputFile(img_data, filename="ai_img.png"),
+                    caption=f"✅ Готово!\n🤖 Модель: `{model_name}`\n🎭 Стиль: `{conf['style']}`",
                     parse_mode="Markdown"
                 )
+                await wait_msg.delete()
             else:
-                await message.answer("❌ Извини, все сервера сейчас перегружены. Попробуй через минуту.")
-        
-        elif mode == "video":
-            video_data = await generate_video(prompt_en)
-            if video_data:
-                await message.answer_video(
-                    BufferedInputFile(video_data, filename="ai_video.mp4"),
-                    caption="🎬 Видео успешно создано!"
-                )
-            else:
-                await message.answer("❌ Ошибка при создании видео.")
+                await wait_msg.edit_text("❌ Сервера нейросетей перегружены. Попробуйте с другим стилем.")
 
     except Exception as e:
-        logging.error(e)
-        await message.answer("🔧 Произошла техническая ошибка. Попробуй позже.")
-    finally:
-        await wait_msg.delete()
+        logger.error(f"Ошибка в handle_request: {e}")
+        await wait_msg.edit_text("🔧 Технический сбой. Попробуйте другой промпт.")
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
-async def handle(request):
-    return web.Response(text="Bot is running!")
+import time # Нужен для cooldown
+
+# --- ВЕБ-СЕРВЕР (HEALTH CHECK) ---
+
+async def handle_ping(request):
+    return web.Response(text="I am alive!")
 
 async def main():
-    # Запуск Health Check сервера
+    # 1. Запуск сервера для Render
     app = web.Application()
-    app.router.add_get("/", handle)
+    app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
     
-    # Запуск бота
-    print("Бот успешно запущен!")
+    # 2. Очистка старых обновлений (исправляет ConflictError)
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # 3. Запуск
+    logger.info(f"Бот запущен на порту {PORT}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен")
