@@ -2,3 +2,5 @@ aiogram
 aiohttp
 python-dotenv
 deep-translator
+huggingface_hub
+Pillow
