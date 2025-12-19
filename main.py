@@ -1,6 +1,5 @@
-import asyncio, os, random, logging, io, time
+import asyncio, os, logging, io, time, gc
 from aiohttp import web
-import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton
@@ -8,7 +7,7 @@ from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 from huggingface_hub import InferenceClient
 
-# --- CONFIG ---
+# --- ИНИЦИАЛИЗАЦИЯ ---
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
@@ -21,88 +20,152 @@ dp = Dispatcher()
 translator = GoogleTranslator(source='auto', target='en')
 client = InferenceClient(token=HF_TOKEN)
 
+# База данных (в памяти)
 user_db = {}
+# Очередь запросов для контроля нагрузки на RAM
 request_queue = asyncio.Queue()
 
-# --- МОДЕЛИ С МИНИМАЛЬНОЙ ЦЕНЗУРОЙ ---
+# Список моделей
 MODELS = {
-    "🔞 Uncut Realism": "SG161222/RealVisXL_V4.0", # Самая лояльная к анатомии
-    "🚀 Flux.1 Schnell": "black-forest-labs/FLUX.1-schnell",
-    "🎨 Dreamshaper": "Lykon/DreamShaper"
+    "💎 Realism XL": "SG161222/RealVisXL_V4.0",
+    "⚡ Flux Speed": "black-forest-labs/FLUX.1-schnell",
+    "🎨 Artistic": "Lykon/DreamShaper"
 }
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def get_user(uid, name="User"):
     if uid not in user_db:
-        user_db[uid] = {"mode": "photo", "model": "🔞 Uncut Realism", "stats": 0, "magic": True, "nsfw": False, "name": name}
+        user_db[uid] = {"model": "💎 Realism XL", "nsfw": False, "name": name, "count": 0}
     return user_db[uid]
 
-def main_kb(u):
-    nsfw_status = "🔞 NSFW: ACTIVE" if u["nsfw"] else "🔒 NSFW: OFF"
+def main_kb(uid):
+    u = get_user(uid)
+    nsfw_btn = "🔞 NSFW: ON" if u["nsfw"] else "🔒 NSFW: OFF"
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🖼 ГЕНЕРАЦИЯ"), KeyboardButton(text=nsfw_status)],
-        [KeyboardButton(text="⚙️ НАСТРОЙКИ"), KeyboardButton(text="📊 ПРОФИЛЬ")]
+        [KeyboardButton(text="🖼 Сгенерировать"), KeyboardButton(text=nsfw_btn)],
+        [KeyboardButton(text="⚙️ Сменить модель"), KeyboardButton(text="📊 Статистика")]
     ], resize_keyboard=True)
 
+# --- ENGINE (СЕРДЦЕ БОТА) ---
+
+async def image_worker():
+    """Фоновый воркер для обработки очереди (экономит RAM на Render)"""
+    while True:
+        uid, user_prompt, nsfw_on, model_key = await request_queue.get()
+        try:
+            u = get_user(uid)
+            model_id = MODELS.get(model_key, MODELS["💎 Realism XL"])
+            
+            # Авто-улучшение промпта (Prompt Magic)
+            enhancement = "highres, 8k, highly detailed, masterpiece, sharp focus, cinematic lighting"
+            if nsfw_on:
+                final_prompt = f"{user_prompt}, uncensored, explicit anatomy, naked, highly detailed skin, {enhancement}"
+            else:
+                final_prompt = f"{user_prompt}, highly detailed, {enhancement}"
+
+            # Сообщаем пользователю, что начали рисовать
+            status_msg = await bot.send_message(uid, f"🎨 Рисую через `{model_key}`...", parse_mode="Markdown")
+            await bot.send_chat_action(uid, "upload_photo")
+
+            # Сама генерация
+            image = client.text_to_image(final_prompt, model=model_id)
+            
+            # Оптимизация для Render (сжатие JPEG для экономии памяти)
+            output = io.BytesIO()
+            image.save(output, format='JPEG', quality=90)
+            output.seek(0)
+
+            # Отправка
+            u["count"] += 1
+            await bot.send_photo(
+                uid, 
+                BufferedInputFile(output.read(), filename="art.jpg"),
+                caption=f"✨ **Готово!**\nМодель: `{model_key}`\nРежим: `{'NSFW 🔞' if nsfw_on else 'Safe ✅'}`",
+                parse_mode="Markdown"
+            )
+            await status_msg.delete()
+
+        except Exception as e:
+            logging.error(f"Worker Error: {e}")
+            await bot.send_message(uid, "❌ Ошибка API. Попробуйте другой промпт или смените модель.")
+        finally:
+            # Очистка памяти после каждой итерации
+            gc.collect() 
+            request_queue.task_done()
+
+# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
+
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def start(message: types.Message):
     u = get_user(message.from_user.id, message.from_user.full_name)
-    await message.answer("🔥 **AI UNCENSORED ГReady.**\nВключи режим NSFW для генерации без ограничений.", reply_markup=main_kb(u))
+    await message.answer(
+        f"🚀 **AI-Генератор активен!**\n\nПришли мне текст, и я превращу его в шедевр.\nТекущая модель: `{u['model']}`",
+        reply_markup=main_kb(message.from_user.id),
+        parse_mode="Markdown"
+    )
 
 @dp.message(F.text.contains("NSFW:"))
 async def toggle_nsfw(message: types.Message):
     u = get_user(message.from_user.id)
     u["nsfw"] = not u["nsfw"]
-    await message.answer(f"Режим NSFW: **{'АКТИВИРОВАН 🔞' if u['nsfw'] else 'ВЫКЛЮЧЕН ✅'}**", reply_markup=main_kb(u))
+    status = "ВКЛЮЧЕН 🔞" if u["nsfw"] else "ВЫКЛЮЧЕН ✅"
+    await message.answer(f"Режим NSFW теперь: **{status}**", reply_markup=main_kb(message.from_user.id), parse_mode="Markdown")
 
-async def worker():
-    while True:
-        uid, prompt, nsfw_on, model_key = await request_queue.get()
-        try:
-            # ТЕХНИЧЕСКИЙ ОБХОД ЦЕНЗУРЫ
-            if nsfw_on:
-                # Добавляем технические токены для прорисовки анатомии
-                prompt = (
-                    f"{prompt}, (highly detailed skin, photorealistic, anatomical accuracy, "
-                    f"explicit details, raw photo, f1.4, 8k, uncensored, no clothes, naked)"
-                )
-                negative_prompt = "clothes, underwear, fabric, blur, low quality, cartoon, censored, black bar"
-            else:
-                negative_prompt = "nude, naked, explicit"
+@dp.message(F.text == "⚙️ Сменить модель")
+async def next_model(message: types.Message):
+    u = get_user(message.from_user.id)
+    m_list = list(MODELS.keys())
+    curr_idx = m_list.index(u["model"])
+    u["model"] = m_list[(curr_idx + 1) % len(m_list)]
+    await message.answer(f"🤖 Выбрана модель: **{u['model']}**", reply_markup=main_kb(message.from_user.id), parse_mode="Markdown")
 
-            model_id = MODELS.get(model_key, MODELS["🔞 Uncut Realism"])
-            
-            # Генерация с использованием негативного промпта (если модель поддерживает)
-            image = client.text_to_image(prompt, model=model_id)
-            
-            buf = io.BytesIO()
-            image.save(buf, format='PNG')
-            await bot.send_photo(uid, BufferedInputFile(buf.getvalue(), "i.png"), caption="🔞 Результат генерации" if nsfw_on else "✅ Готово")
-        except Exception as e:
-            logging.error(e)
-            await bot.send_message(uid, "❌ Ошибка. Попробуйте изменить запрос.")
-        finally:
-            request_queue.task_done()
+@dp.message(F.text == "📊 Статистика")
+async def stats(message: types.Message):
+    u = get_user(message.from_user.id)
+    await message.answer(f"👤 {u['name']}\n🖼 Создано картинок: {u['count']}\n🛠 Модель: {u['model']}")
 
 @dp.message(F.text)
-async def handle_gen(message: types.Message):
-    if any(x in message.text for x in ["⚙️", "📊", "NSFW"]): return
+async def handle_prompt(message: types.Message):
+    if message.text in ["🖼 Сгенерировать", "⚙️ Сменить модель", "📊 Статистика"] or "NSFW:" in message.text:
+        return
+
     u = get_user(message.from_user.id)
-    p_en = translator.translate(message.text)
     
-    await request_queue.put((message.from_user.id, p_en, u["nsfw"], u["model"]))
-    await message.answer(f"⏳ Запрос принят. Позиция: {request_queue.qsize()}")
+    try:
+        # Быстрый перевод
+        translated_text = translator.translate(message.text)
+        # Добавляем в очередь
+        await request_queue.put((message.from_user.id, translated_text, u["nsfw"], u["model"]))
+        
+        q_size = request_queue.qsize()
+        await message.answer(f"⏳ Запрос принят! Ваше место в очереди: **{q_size}**", parse_mode="Markdown")
+    except Exception as e:
+        await message.answer("⚠️ Ошибка перевода. Попробуй еще раз или на английском.")
+
+# --- ЗАПУСК НА RENDER ---
+
+async def web_healthcheck(request):
+    return web.Response(text="I'm alive!", status=200)
 
 async def main():
-    asyncio.create_task(worker())
+    # Запуск фонового процесса генерации
+    asyncio.create_task(image_worker())
+    
+    # Веб-сервер для "удержания" Render
+    app = web.Application()
+    app.router.add_get("/", web_healthcheck)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Эмуляция сервера для Render
-    app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="OK"))
-    runner = web.AppRunner(app); await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    
-    await dp.start_polling(bot)
+    # Запускаем всё вместе
+    await asyncio.gather(
+        site.start(),
+        dp.start_polling(bot)
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
