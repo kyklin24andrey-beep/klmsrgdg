@@ -1,4 +1,4 @@
-pyTelegramBotAPI
-requests
-deep_translator
-flask
+aiogram
+aiohttp
+python-dotenv
+deep-translator
