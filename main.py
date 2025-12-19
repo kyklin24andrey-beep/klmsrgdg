@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 from huggingface_hub import InferenceClient
 
-# --- ИНИЦИАЛИЗАЦИЯ ---
+# --- НАСТРОЙКИ ---
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
@@ -20,152 +20,155 @@ dp = Dispatcher()
 translator = GoogleTranslator(source='auto', target='en')
 client = InferenceClient(token=HF_TOKEN)
 
-# База данных (в памяти)
 user_db = {}
-# Очередь запросов для контроля нагрузки на RAM
 request_queue = asyncio.Queue()
 
-# Список моделей
-MODELS = {
-    "💎 Realism XL": "SG161222/RealVisXL_V4.0",
-    "⚡ Flux Speed": "black-forest-labs/FLUX.1-schnell",
-    "🎨 Artistic": "Lykon/DreamShaper"
+# --- ТОЛЬКО FLUX ---
+MODEL_ID = "black-forest-labs/FLUX.1-schnell"
+
+# --- 10 КРУТЫХ СТИЛЕЙ ---
+STYLES = {
+    "🚫 Без стиля": "",
+    "📸 Realism": "raw photo, 8k uhd, dslr, soft lighting, high quality, film grain, fujifilm xt3",
+    "🌸 Anime": "anime style, studio ghibli, makoto shinkai, vibrant colors, highly detailed background",
+    "🔫 GTA Art": "GTA V loading screen art, grand theft auto style, vector art, cel shaded, sharp lines",
+    "🤖 Cyberpunk": "cyberpunk 2077 style, neon lights, night city, chrome, synthwave, futuristic",
+    "🧸 3D Pixar": "3d render, disney pixar style, octane render, cute, volumetric lighting, cartoon, 4k",
+    "💀 Dark Fantasy": "dark fantasy, elden ring style, gloomy, gothic, intricate details, scary, fog, monster",
+    "📼 Retro 80s": "vaporwave, 1980s retro, neon grid, vhs glitch effect, pastel gradient, synthpop",
+    "🧊 Voxel/Lego": "voxel art, minecraft style, isometric view, 8-bit, blocky, 3d blocks",
+    "🖌️ Oil Paint": "oil painting, impasto, claude monet style, thick brush strokes, canvas texture, artistic",
+    "🕵️ Film Noir": "film noir, black and white, dramatic shadows, detective movie style, high contrast, 1940s"
 }
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ФУНКЦИИ ---
 
 def get_user(uid, name="User"):
     if uid not in user_db:
-        user_db[uid] = {"model": "💎 Realism XL", "nsfw": False, "name": name, "count": 0}
+        # По умолчанию ставим "Без стиля"
+        user_db[uid] = {"style": "🚫 Без стиля", "nsfw": False, "name": name, "count": 0}
     return user_db[uid]
 
 def main_kb(uid):
     u = get_user(uid)
-    nsfw_btn = "🔞 NSFW: ON" if u["nsfw"] else "🔒 NSFW: OFF"
+    nsfw_status = "🔞 NSFW: ON" if u["nsfw"] else "🔒 NSFW: OFF"
+    # Динамическая клавиатура показывающая текущий стиль
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🖼 Сгенерировать"), KeyboardButton(text=nsfw_btn)],
-        [KeyboardButton(text="⚙️ Сменить модель"), KeyboardButton(text="📊 Статистика")]
+        [KeyboardButton(text="🖼 ГЕНЕРАЦИЯ"), KeyboardButton(text=f"🎨 {u['style']}")],
+        [KeyboardButton(text="⚙️ СМЕНИТЬ СТИЛЬ ⏩"), KeyboardButton(text=nsfw_status)]
     ], resize_keyboard=True)
 
-# --- ENGINE (СЕРДЦЕ БОТА) ---
+# --- WORKER (ГЕНЕРАТОР) ---
 
 async def image_worker():
-    """Фоновый воркер для обработки очереди (экономит RAM на Render)"""
     while True:
-        uid, user_prompt, nsfw_on, model_key = await request_queue.get()
+        uid, user_prompt, nsfw_on, style_key = await request_queue.get()
         try:
             u = get_user(uid)
-            model_id = MODELS.get(model_key, MODELS["💎 Realism XL"])
+            style_prompt = STYLES.get(style_key, "")
             
-            # Авто-улучшение промпта (Prompt Magic)
-            enhancement = "highres, 8k, highly detailed, masterpiece, sharp focus, cinematic lighting"
+            # Магия промптов
+            enhance = "masterpiece, sharp focus, ultra detailed"
+            
             if nsfw_on:
-                final_prompt = f"{user_prompt}, uncensored, explicit anatomy, naked, highly detailed skin, {enhancement}"
+                final_prompt = f"{user_prompt}, {style_prompt}, uncensored, explicit anatomy, naked, {enhance}"
             else:
-                final_prompt = f"{user_prompt}, highly detailed, {enhancement}"
+                final_prompt = f"{user_prompt}, {style_prompt}, {enhance}"
 
-            # Сообщаем пользователю, что начали рисовать
-            status_msg = await bot.send_message(uid, f"🎨 Рисую через `{model_key}`...", parse_mode="Markdown")
             await bot.send_chat_action(uid, "upload_photo")
-
-            # Сама генерация
-            image = client.text_to_image(final_prompt, model=model_id)
             
-            # Оптимизация для Render (сжатие JPEG для экономии памяти)
+            # Запрос к FLUX
+            image = client.text_to_image(final_prompt, model=MODEL_ID)
+            
+            # Оптимизация памяти (JPEG)
             output = io.BytesIO()
-            image.save(output, format='JPEG', quality=90)
+            image.save(output, format='JPEG', quality=85)
             output.seek(0)
 
-            # Отправка
             u["count"] += 1
             await bot.send_photo(
                 uid, 
-                BufferedInputFile(output.read(), filename="art.jpg"),
-                caption=f"✨ **Готово!**\nМодель: `{model_key}`\nРежим: `{'NSFW 🔞' if nsfw_on else 'Safe ✅'}`",
-                parse_mode="Markdown"
+                BufferedInputFile(output.read(), filename="image.jpg"),
+                caption=f"✨ **Готово!**\n🎨 Стиль: `{style_key}`",
+                parse_mode="Markdown",
+                reply_markup=main_kb(uid)
             )
-            await status_msg.delete()
 
         except Exception as e:
-            logging.error(f"Worker Error: {e}")
-            await bot.send_message(uid, "❌ Ошибка API. Попробуйте другой промпт или смените модель.")
+            logging.error(f"Gen Error: {e}")
+            await bot.send_message(uid, "⚠️ Сбой генерации. Попробуйте снова.")
         finally:
-            # Очистка памяти после каждой итерации
-            gc.collect() 
+            gc.collect() # Чистим память Render
             request_queue.task_done()
 
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
+# --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     u = get_user(message.from_user.id, message.from_user.full_name)
     await message.answer(
-        f"🚀 **AI-Генератор активен!**\n\nПришли мне текст, и я превращу его в шедевр.\nТекущая модель: `{u['model']}`",
+        f"👋 **Привет! Я Flux Generator.**\n\n"
+        f"Я умею рисовать в **10 разных стилях** (GTA, Аниме, Реализм и др).\n"
+        f"Просто выбери стиль и напиши, что нарисовать!",
         reply_markup=main_kb(message.from_user.id),
         parse_mode="Markdown"
     )
+
+@dp.message(F.text == "⚙️ СМЕНИТЬ СТИЛЬ ⏩")
+async def change_style(message: types.Message):
+    u = get_user(message.from_user.id)
+    # Получаем список всех стилей
+    style_names = list(STYLES.keys())
+    # Ищем индекс текущего и берем следующий
+    current_index = style_names.index(u["style"])
+    next_style = style_names[(current_index + 1) % len(style_names)]
+    
+    u["style"] = next_style
+    await message.answer(f"🎨 Стиль изменен на: **{next_style}**", reply_markup=main_kb(message.from_user.id), parse_mode="Markdown")
 
 @dp.message(F.text.contains("NSFW:"))
 async def toggle_nsfw(message: types.Message):
     u = get_user(message.from_user.id)
     u["nsfw"] = not u["nsfw"]
     status = "ВКЛЮЧЕН 🔞" if u["nsfw"] else "ВЫКЛЮЧЕН ✅"
-    await message.answer(f"Режим NSFW теперь: **{status}**", reply_markup=main_kb(message.from_user.id), parse_mode="Markdown")
-
-@dp.message(F.text == "⚙️ Сменить модель")
-async def next_model(message: types.Message):
-    u = get_user(message.from_user.id)
-    m_list = list(MODELS.keys())
-    curr_idx = m_list.index(u["model"])
-    u["model"] = m_list[(curr_idx + 1) % len(m_list)]
-    await message.answer(f"🤖 Выбрана модель: **{u['model']}**", reply_markup=main_kb(message.from_user.id), parse_mode="Markdown")
-
-@dp.message(F.text == "📊 Статистика")
-async def stats(message: types.Message):
-    u = get_user(message.from_user.id)
-    await message.answer(f"👤 {u['name']}\n🖼 Создано картинок: {u['count']}\n🛠 Модель: {u['model']}")
+    await message.answer(f"Режим NSFW: **{status}**", reply_markup=main_kb(message.from_user.id), parse_mode="Markdown")
 
 @dp.message(F.text)
-async def handle_prompt(message: types.Message):
-    if message.text in ["🖼 Сгенерировать", "⚙️ Сменить модель", "📊 Статистика"] or "NSFW:" in message.text:
+async def handle_text(message: types.Message):
+    # Игнорируем нажатия на кнопки меню
+    if message.text in ["🖼 ГЕНЕРАЦИЯ", "⚙️ СМЕНИТЬ СТИЛЬ ⏩"] or "NSFW:" in message.text or message.text.startswith("🎨"):
+        if message.text == "🖼 ГЕНЕРАЦИЯ":
+            await message.answer("Просто напиши мне текст, и я начну рисовать!")
         return
 
     u = get_user(message.from_user.id)
     
     try:
-        # Быстрый перевод
-        translated_text = translator.translate(message.text)
-        # Добавляем в очередь
-        await request_queue.put((message.from_user.id, translated_text, u["nsfw"], u["model"]))
+        # Перевод на английский (Flux лучше понимает EN)
+        translated = translator.translate(message.text)
         
-        q_size = request_queue.qsize()
-        await message.answer(f"⏳ Запрос принят! Ваше место в очереди: **{q_size}**", parse_mode="Markdown")
-    except Exception as e:
-        await message.answer("⚠️ Ошибка перевода. Попробуй еще раз или на английском.")
+        await request_queue.put((message.from_user.id, translated, u["nsfw"], u["style"]))
+        
+        q_pos = request_queue.qsize()
+        await message.answer(f"⏳ Принято! Позиция в очереди: **{q_pos}**\n🎨 Стиль: *{u['style']}*", parse_mode="Markdown")
+    except:
+        await message.answer("⚠️ Не удалось перевести запрос. Попробуйте на английском.")
 
-# --- ЗАПУСК НА RENDER ---
+# --- ЗАПУСК ---
 
-async def web_healthcheck(request):
-    return web.Response(text="I'm alive!", status=200)
+async def web_health(request):
+    return web.Response(text="Bot is OK")
 
 async def main():
-    # Запуск фонового процесса генерации
     asyncio.create_task(image_worker())
     
-    # Веб-сервер для "удержания" Render
     app = web.Application()
-    app.router.add_get("/", web_healthcheck)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    app.router.add_get("/", web_health)
+    runner = web.AppRunner(app); await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
     
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Запускаем всё вместе
-    await asyncio.gather(
-        site.start(),
-        dp.start_polling(bot)
-    )
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
