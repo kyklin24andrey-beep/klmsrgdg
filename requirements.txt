@@ -1,7 +1,6 @@
-aiogram
-aiohttp
-python-dotenv
-deep-translator
-huggingface_hub
-Pillow
-uvloop
+aiogram==3.4.1
+aiohttp==3.9.5
+python-dotenv==1.0.1
+huggingface-hub==0.23.4
+deep-translator==1.11.4
+Pillow==10.4.0
