@@ -4,3 +4,4 @@ python-dotenv
 deep-translator
 huggingface_hub
 Pillow
+uvloop
